@@ -1,15 +1,15 @@
-import io
 import math
 import traceback
+from io import BytesIO
 from typing import List, Optional, Tuple, Union
 
-import aiohttp
-from hoshino.typing import MessageSegment
+import httpx
+from nonebot.adapters.onebot.v11 import MessageSegment
 from PIL import Image, ImageDraw
 from pydantic import BaseModel
 
-from .. import *
-from .image import DrawText, image_to_base64
+from ..config import *
+from .image import DrawText, image_to_bytesio
 from .maimaidx_api_data import maiApi
 from .maimaidx_error import *
 from .maimaidx_music import download_music_pictrue, mai
@@ -30,6 +30,7 @@ class ChartInfo(BaseModel):
     song_id: int
     title: str
     type: str
+    dxrate: Optional[float] = None
 
 
 class Data(BaseModel):
@@ -46,19 +47,36 @@ class UserInfo(BaseModel):
     plate: Optional[str] = None
     rating: Optional[int]
     username: Optional[str]
+    records: Optional[List[ChartInfo]]
 
 
 class DrawBest:
 
-    def __init__(self, UserInfo: UserInfo, qqId: Optional[Union[int, str]] = None) -> None:
+    def __init__(self, UserInfo: UserInfo, qqId: Optional[Union[int, str]] = None, level: Optional[str] = None, page: Optional[int] = None):
 
         self.userName = UserInfo.nickname
         self.plate = UserInfo.plate
         self.addRating = UserInfo.additional_rating
         self.Rating = UserInfo.rating
-        self.sdBest = UserInfo.charts.sd
-        self.dxBest = UserInfo.charts.dx
         self.qqId = qqId
+        self.records = UserInfo.records
+
+        self.level = level
+        self.page = page
+
+        '''id='382' title='おこちゃま戦争' type='SD' ds=[6.0, 7.3, 10.8, 13.3] level=['6', '7', '10+', '13'] cids=[2751, 2752, 2753, 2754] charts=[Chart(notes=Notes(tap=198, hold=24, slide=3, brk=7), charter='-'), Chart(notes=Notes(tap=345, hold=7, slide=10, brk=14), charter='-'), Chart(notes=Notes(tap=349, hold=58, slide=28, brk=14), charter='某S氏'), Chart(notes=Notes(tap=658, hold=27, slide=40, brk=15), charter='はっぴー')] basic_info=BasicInfo(title='おこちゃま戦争', artist='ギガ/れをる', genre='niconico & VOCALOID', bpm=175, release_date='', version='maimai ORANGE', is_new=False) stats=[Stats(cnt=1461.0, diff='6', fit_diff=6.044117206615401, avg=98.99056872005482, avg_dx=607.2190280629706, std_dev=1.463312987190402, dist=[11, 4, 6, 8, 6, 46, 16, 24, 17, 10, 10, 14, 151, 1138], fc_dist=[204.0, 91.0, 359.0, 470.0, 337.0]), Stats(cnt=2427.0, diff='7', fit_diff=7.464780370564297, avg=96.19806744952581, avg_dx=904.8475484136794, std_dev=3.6903192991508313, dist=[17, 16, 26, 26, 35, 228, 183, 220, 94, 121, 57, 66, 163, 1175], fc_dist=[1045.0, 171.0, 431.0, 635.0, 145.0]), Stats(cnt=11575.0, diff='10+', fit_diff=11.020517983062796, avg=96.49911479049715, avg_dx=1036.1744276457882, std_dev=3.1185126074217053, dist=[20, 24, 23, 30, 70, 725, 1238, 2371, 1439, 1715, 890, 754, 858, 1418], fc_dist=[7877.0, 2534.0, 730.0, 375.0, 59.0]), Stats(cnt=16534.0, diff='13', fit_diff=13.412406903757972, avg=97.52620735454207, avg_dx=1814.7217854118785, std_dev=2.5433036930848902, dist=[60, 33, 60, 39, 69, 602, 964, 2013, 1721, 2293, 1549, 1673, 3151, 2307], fc_dist=[12261.0, 3383.0, 677.0, 185.0, 28.0]), None] diff=[]'''
+
+        # 选出is_new=False的records
+        self.sdBest = [i for i in self.records if i.level == self.level]
+        self.dxBest = []
+
+        # 计算每个曲目的dx分数
+        for record in self.sdBest:
+            dxscore = sum(mai.total_list.by_id(str(record.song_id)).charts[record.level_index].notes) * 3
+            record.dxrate = record.dxScore / dxscore * 100
+
+        #按ra从高到低排序，取前35首
+        self.sdBest = sorted(self.sdBest, key=lambda x: x.dxrate, reverse=True)[page * SONGS_PER_PAGE - SONGS_PER_PAGE:page * SONGS_PER_PAGE]
 
     def _findRaPic(self) -> str:
         if self.Rating < 1000:
@@ -85,6 +103,7 @@ class DrawBest:
             num = '11'
         return f'UI_CMN_DXRating_{num}.png'
 
+
     def _findMatchLevel(self) -> str:
         if self.addRating <= 10:
             num = f'{self.addRating:02d}'
@@ -92,18 +111,20 @@ class DrawBest:
             num = f'{self.addRating + 1:02d}'
         return f'UI_DNM_DaniPlate_{num}.png'
 
+
     async def whiledraw(self, data: List[ChartInfo], type: bool) -> Image.Image:
         # y为第一排纵向坐标，dy为各排间距
         y = 430 if type else 1670
-        dy = 170
+        dy = 174
 
         TEXT_COLOR = [(255, 255, 255, 255), (255, 255, 255, 255), (255, 255, 255, 255), (255, 255, 255, 255), (103, 20, 141, 255)]
         DXSTAR_DEST = [0, 330, 320, 310, 300, 290]
+        
 
-        for num, info in enumerate(data):
+        for num, info in enumerate(data): 
             if num % 5 == 0:
                 x = 70
-                y += dy if num != 0 else 0
+                y += dy if num != 0 else -10
             else:
                 x += 416
 
@@ -126,19 +147,40 @@ class DrawBest:
             diff_sum_dx = info.dxScore / dxscore * 100
             dxtype, dxnum = dxScore(diff_sum_dx)
             for _ in range(dxnum):
-                self._im.alpha_composite(self.dxstar[dxtype], (x + DXSTAR_DEST[dxnum] + 20 * _, y + 74))
+                self._im.alpha_composite(self.dxstar[dxtype], (x + DXSTAR_DEST[dxnum] + 20 * _ + 2, y + 60))
+
+            y8 = 0
+            if info.fc == 'fcp':
+                y8 += 1
+            elif info.fc == 'ap' or info.fc == 'app':
+                y8 += 2
+            if info.achievements >= 100.98:
+                y8 += 3
+            elif info.achievements >= 100.95:
+                y8 += 2
+            elif info.achievements >= 100.9:
+                y8 += 1
+            y8 += max(dxnum - 2, 0)
+
+            yrating = info.ds * min((max(100*(info.achievements-100), 0)), (100 * info.dxScore / dxscore))/100
+
+            self._im.alpha_composite(Image.open(maimaidir / 'yang.png').resize((18,18)), (x + 346, y + 78))
 
             self._tb.draw(x + 40, y + 148, 20, info.song_id, anchor='mm')
             title = info.title
-            if coloumWidth(title) > 18:
-                title = changeColumnWidth(title, 17) + '...'
-            self._siyuan.draw(x + 155, y + 20, 20, title, TEXT_COLOR[info.level_index], anchor='lm')
+            if coloumWidth(title) > 14:
+                title = changeColumnWidth(title, 12) + '...'
+            self._siyuan.draw(x + 155, y + 20, 18, title, TEXT_COLOR[info.level_index], anchor='lm')
             p, s = f'{info.achievements:.4f}'.split('.')
-            r = self._tb.get_box(p, 32)
-            self._tb.draw(x + 155, y + 70, 32, p, TEXT_COLOR[info.level_index], anchor='ld')
-            self._tb.draw(x + 155 + r[2], y + 68, 22, f'.{s}%', TEXT_COLOR[info.level_index], anchor='ld')
-            self._tb.draw(x + 340, y + 60, 18, f'{info.dxScore}/{dxscore}', TEXT_COLOR[info.level_index], anchor='mm')
-            self._tb.draw(x + 155, y + 80, 22, f'{info.ds} -> {info.ra}', TEXT_COLOR[info.level_index], anchor='lm')
+            r = self._tb.get_box(p, 30)
+            self._tb.draw(x + 151, y + 72, 30, p, TEXT_COLOR[info.level_index], anchor='ld')
+            self._tb.draw(x + 151 + r[2], y + 70, 23, f'.{s}%', TEXT_COLOR[info.level_index], anchor='ld')
+            self._tb.draw(x + 340, y + 50, 16, f'{info.dxScore}/{dxscore}', TEXT_COLOR[info.level_index], anchor='mm')
+            self._tb.draw(x + 152, y + 81, 18, f'{info.ds}-{info.ra}-{info.dxrate:.2f}%', TEXT_COLOR[info.level_index], anchor='lm')
+            self._tb.draw(x + 320, y + 85, 15, f'{yrating:.3f}', TEXT_COLOR[info.level_index], anchor='mm')
+            self._tb.draw(x + 372, y + 85, 16, f'x{y8}', TEXT_COLOR[info.level_index], anchor='mm')
+            self._tb.draw(x + 338, y + 20, 23, f'No.{num + 1 + (self.page - 1) * 50}', TEXT_COLOR[info.level_index], anchor='mm')
+
 
     async def draw(self):
         
@@ -154,7 +196,7 @@ class DrawBest:
         ClassLevel = Image.open(maimaidir / 'UI_FBR_Class_00.png').resize((144, 87))
         rating = Image.open(maimaidir / 'UI_CMN_Shougou_Rainbow.png').resize((454, 50))
         self._diff = [basic, advanced, expert, master, remaster]
-        self.dxstar = [Image.open(maimaidir / f'UI_RSL_DXScore_Star_0{_ + 1}.png').resize((20, 20)) for _ in range(3)]
+        self.dxstar = [Image.open(maimaidir / f'UI_RSL_DXScore_Star_0{_ + 1}.png').resize((18, 18)) for _ in range(3)]
 
         # 作图
         self._im = Image.open(maimaidir / 'b40_bg.png').convert('RGBA')
@@ -169,8 +211,9 @@ class DrawBest:
         self._im.alpha_composite(icon, (398, 108))
         if self.qqId:
             try:
-                async with aiohttp.request('GET', f'http://q1.qlogo.cn/g?b=qq&nk={self.qqId}&s=100', timeout=aiohttp.ClientTimeout(total=10)) as resp:
-                    qqLogo = Image.open(io.BytesIO(await resp.read()))
+                async with httpx.AsyncClient() as client:
+                    res = await client.get(f'http://q1.qlogo.cn/g?b=qq&nk={self.qqId}&s=100')
+                    qqLogo = Image.open(BytesIO(res.content))
                 self._im.alpha_composite(Image.new('RGBA', (203, 203), (255, 255, 255, 255)), (404, 114))
                 self._im.alpha_composite(qqLogo.convert('RGBA').resize((201, 201)), (405, 115))
             except Exception:
@@ -191,13 +234,16 @@ class DrawBest:
 
         self._siyuan.draw(635, 235, 40, self.userName, (0, 0, 0, 255), 'lm')
         sdrating, dxrating = sum([_.ra for _ in self.sdBest]), sum([_.ra for _ in self.dxBest])
-        self._tb.draw(847, 295, 28, f'B35: {sdrating} + B15: {dxrating} = {self.Rating}', (0, 0, 0, 255), 'mm', 3, (255, 255, 255, 255))
-        self._meiryo.draw(900, 2365, 35, f'Designed by Yuri-YuzuChaN & BlueDeer233 | Generated by {BOTNAME} BOT', (103, 20, 141, 255), 'mm', 3, (255, 255, 255, 255))
+        self._tb.draw(847, 295, 28, f'LV{self.level} DX score list, No.{self.page} page.', (0, 0, 0, 255), 'mm', 3, (255, 255, 255, 255))
+        self._siyuan.draw(1115, 2352, 20, f'（杨氏rating计算方式为：谱面定数*min(100*(达成率-100),dx分/总dx分)，最低为0；8分法计算方式为：FC+，AP，100.9，100.95，100.98，三星，四星，五星各计一分。仅供娱乐，请玩家合理参考，解释权归杨树森6所有。）', (103, 20, 141, 255), 'mm', 3, (255, 255, 255, 255))
+        self._siyuan.draw(1115, 2380, 20, f'改编自：Yuri-YuzuChaN，作者：宇航员Dale，Bot：宇航员猫娘', (103, 20, 141, 255), 'mm', 3, (255, 255, 255, 255))
+        # self._meiryo.draw(900, 2365, 35, f'Designed by Yuri-YuzuChaN & BlueDeer233 | Generated by {maiconfig.botName} BOT', (103, 20, 141, 255), 'mm', 3, (255, 255, 255, 255))
 
         await self.whiledraw(self.sdBest, True)
         await self.whiledraw(self.dxBest, False)
 
         return self._im.resize((1760, 1920))
+
 
 def dxScore(dx: int) -> Tuple[int, int]:
     """
@@ -317,17 +363,17 @@ def generateAchievementList(ds: float):
     _achievementList.append(100.5)
     return _achievementList
 
-async def generate(qqid: Optional[int] = None, username: Optional[str] = None) -> str:
+async def generate_list_dx(qqid: Optional[int] = None, username: Optional[str] = None, level: Optional[str] = None, page: Optional[int] = None):
     try:
-        if username:
-            qqid = None
-        obj = await maiApi.query_user('player', qqid=qqid, username=username)
+        
+        version = list(set(_v for _v in list(plate_to_version.values())))
+        obj = await maiApi.query_user_dev(qqid=qqid, username=username)
 
         mai_info = UserInfo(**obj)
-        draw_best = DrawBest(mai_info, qqid)
+        draw_best = DrawBest(mai_info, qqid, level, page)
         
         pic = await draw_best.draw()
-        msg = MessageSegment.image(image_to_base64(pic))
+        msg = MessageSegment.image(image_to_bytesio(pic))
     except UserNotFoundError as e:
         msg = str(e)
     except UserDisabledQueryError as e:

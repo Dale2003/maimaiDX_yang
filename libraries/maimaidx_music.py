@@ -8,13 +8,14 @@ from io import BytesIO
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import aiofiles
-import aiohttp
+import httpx
 from PIL import Image
 from pydantic import BaseModel, Field
 
-from .. import *
+from ..config import *
 from .image import image_to_base64
-from .maimaidx_api_data import *
+from .maimaidx_api_data import maiApi
+from .maimaidx_error import *
 
 
 class Stats(BaseModel):
@@ -222,6 +223,7 @@ class Alias(BaseModel):
     Name: Optional[str] = None
     Alias: Optional[List[str]] = None
 
+
 class AliasList(List[Alias]):
 
     def by_id(self, music_id: int) -> Optional[List[Alias]]:
@@ -248,8 +250,9 @@ async def download_music_pictrue(song_id: Union[int, str]) -> Union[str, BytesIO
             for _id in [song_id + 10000, song_id - 10000]:
                 if (file := coverdir / f'{_id}.png').exists():
                     return file
-        async with aiohttp.request('GET', f'https://www.diving-fish.com/covers/{song_id:05d}.png', timeout=aiohttp.ClientTimeout(total=60)) as req:
-            if req.status == 200:
+        async with httpx.AsyncClient(timeout=60) as client:
+            req = await client.get(f'https://www.diving-fish.com/covers/{song_id:05d}.png')
+            if req.status_code == 200:
                 return BytesIO(await req.read())
             else:
                 return coverdir / '11000.png'
@@ -278,7 +281,7 @@ async def get_music_list() -> MusicList:
         try:
             music_data = await maiApi.music_data()
             await writefile(music_file, music_data)
-        except asyncio.exceptions.TimeoutError:
+        except asyncio.exceptions.TimeoutError:  # noqa
             log.error('从diving-fish获取maimaiDX曲目数据超时，正在使用yuzuapi中转获取曲目数据')
             music_data = await maiApi.transfer_music()
             await writefile(music_file, music_data)
@@ -309,7 +312,7 @@ async def get_music_list() -> MusicList:
             log.error('maimaiDX数据获取错误，请检查网络环境。已切换至本地暂存文件')
             chart_stats = await openfile(chart_file)
     except FileNotFoundError:
-        log.error(f'未找到文件，请自行使用浏览器访问 "https://www.diving-fish.com/api/maimaidxprober/chart_stats" 将内容保存为 "chart_stats.json" 存放在 "static" 目录下并重启bot')
+        log.error(f'未找到文件，请自行使用浏览器访问 "https://www.diving-fish.com/api/maimaidxprober/chart_stats" 将内容保存为 "music_chart.json" 存放在 "static" 目录下并重启bot')
 
     total_list: MusicList = MusicList(music_data)
     for num, music in enumerate(total_list):
@@ -320,6 +323,7 @@ async def get_music_list() -> MusicList:
         total_list[num] = Music(stats=_stats, **total_list[num])
 
     return total_list
+
 
 async def get_music_alias_list() -> AliasList:
     """
@@ -333,13 +337,19 @@ async def get_music_alias_list() -> AliasList:
     try:
         alias_data = await maiApi.get_alias()
         await writefile(alias_file, alias_data)
+    except asyncio.exceptions.TimeoutError:
+        log.error('获取别名超时。已切换至本地暂存文件')
+        alias_data = await openfile(alias_file)
+        if not alias_data:
+            log.error('本地暂存别名文件为空，请自行使用浏览器访问 "https://api.yuzuai.xyz/maimaidx/maimaidxalias" 获取别名数据并保存在 "static/music_alias.json" 文件中并重启bot')
+            raise ValueError
     except ServerError as e:
         log.error(e)
     except UnknownError:
         log.error('获取所有曲目别名信息错误，请检查网络环境。已切换至本地暂存文件')
         alias_data = await openfile(alias_file)
         if not alias_data:
-            log.error('本地暂存别名文件为空，请自行使用浏览器访问 "https://api.yuzuchan.moe/maimaidx/maimaidxalias" 获取别名数据并保存在 "static/all_alias.json" 文件中并重启bot')
+            log.error('本地暂存别名文件为空，请自行使用浏览器访问 "https://api.yuzuai.xyz/maimaidx/maimaidxalias" 获取别名数据并保存在 "static/music_alias.json" 文件中并重启bot')
             raise ValueError
 
     for _a in alias_data:
@@ -351,6 +361,7 @@ async def get_music_alias_list() -> AliasList:
         total_alias_list[_] = Alias(**alias_data[_])
 
     return total_alias_list
+
 
 async def update_local_alias(id: str, alias_name: str) -> bool:
     try:
@@ -367,6 +378,7 @@ async def update_local_alias(id: str, alias_name: str) -> bool:
     except Exception as e:
         log.error(f'添加本地别名失败: {e}')
         return False
+
 
 class MaiMusic:
 
@@ -424,6 +436,8 @@ class Guess:
         """
         猜歌类
         """
+    
+    def load_config(self) -> None:
         if not guess_file.exists():
             with open(guess_file, 'w', encoding='utf-8') as f:
                 json.dump({'enable': [], 'disable': []}, f)
@@ -498,6 +512,9 @@ guess = Guess()
 class GroupAlias:
 
     def __init__(self) -> None:
+        """别名推送类"""
+    
+    def load_config(self) -> None:
         if not group_alias_file.exists():
             with open(group_alias_file, 'w', encoding='utf-8') as f:
                 json.dump({'enable': [], 'disable': [], 'global': True}, f)

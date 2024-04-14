@@ -1,9 +1,8 @@
-import json
 from typing import Any, List, Optional
 
-from aiohttp import ClientSession, ClientTimeout
+import httpx
 
-from .. import config_json
+from ..config import maiconfig
 from .maimaidx_error import *
 
 
@@ -13,37 +12,38 @@ class MaimaiAPI:
     MaiAliasAPI = 'https://api.yuzuchan.moe/maimaidx'
     
     def __init__(self) -> None:
-        self.token = self.load_token()
-        self.headers = {'developer-token': self.token}
+        """封装Api"""
     
     def load_token(self) -> str:
-        return json.load(open(config_json, 'r', encoding='utf-8'))['token']
+        self.token = maiconfig.maimaidxtoken
+        self.headers = {'developer-token': self.token}
     
     async def _request(self, method: str, url: str, **kwargs) -> Any:
-        session = ClientSession(timeout=ClientTimeout(total=30))
+        
+        session = httpx.AsyncClient(timeout=30)
         res = await session.request(method, url, **kwargs)
 
         data = None
         
         if self.MaiAPI in url:
-            if res.status == 200:
-                data = await res.json()
-            elif res.status == 400:
+            if res.status_code == 200:
+                data = res.json()
+            elif res.status_code == 400:
                 raise UserNotFoundError
-            elif res.status == 403:
+            elif res.status_code == 403:
                 raise UserDisabledQueryError
             else:
                 raise UnknownError
         elif self.MaiAliasAPI in url:
-            if res.status == 200:
-                data = (await res.json())['content']
-            elif res.status == 400:
+            if res.status_code == 200:
+                data = res.json()['content']
+            elif res.status_code == 400:
                 raise EnterError
-            elif res.status == 500:
+            elif res.status_code == 500:
                 raise ServerError
             else:
                 raise UnknownError
-        await session.close()
+        await session.aclose()
         return data
     
     async def music_data(self):
